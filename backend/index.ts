@@ -145,7 +145,7 @@ app.post('/api/clean', (request, response) => {
     record('Trim text values', `Trimmed leading/trailing whitespace in text cells.`, affected)
   } else steps.push({ name: 'Trim text values', detail: 'Skipped by user.', status: 'skipped' })
   if (options.normalizeHeaders) {
-    const renamed = new Map(dataset.columns.map((column) => [column, column.trim().replace(/\\s+/g, '_')]))
+    const renamed = new Map(dataset.columns.map((column) => [column, column.trim().replace(/\s+/g, '_')]))
     rows = rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [renamed.get(key) ?? key, value])))
     record('Normalize column names', 'Trimmed headers and replaced internal spaces with underscores.', dataset.columns.filter((column) => renamed.get(column) !== column).length)
   } else steps.push({ name: 'Normalize column names', detail: 'Skipped by user.', status: 'skipped' })
@@ -183,9 +183,9 @@ app.post('/api/clean', (request, response) => {
     record('Remove duplicate rows', `Removed ${count - rows.length} exact duplicate rows.`, count - rows.length)
   } else steps.push({ name: 'Remove duplicate rows', detail: 'Skipped by user.', status: 'skipped' })
   const columns = Object.keys(rows[0] ?? {}).length ? Object.keys(rows[0]) : dataset.columns
-  const escapeCsv = (value: unknown) => { const text = value === null || value === undefined ? '' : String(value); return /[",\\r\\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text }
+  const escapeCsv = (value: unknown) => { const text = value === null || value === undefined ? '' : String(value); return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text }
   const csv = [columns.map(escapeCsv).join(','), ...rows.map((row) => columns.map((column) => escapeCsv(row[column])).join(','))].join('\n')
-  return response.json({ steps, rowsBefore: before, rowsAfter: rows.length, missingCellsBefore: missingCount, downloadName: `cleaned-${dataset.fileName.replace(/\\.[^.]+$/, '')}.csv`, csv, audit: { options, sourceFile: dataset.fileName, rowsBefore: before, rowsAfter: rows.length, unchangedSource: true } })
+  return response.json({ steps, rowsBefore: before, rowsAfter: rows.length, missingCellsBefore: missingCount, downloadName: 'cleaned-' + dataset.fileName.replace(/\.[^.]+$/, '') + '.csv', csv, audit: { options, sourceFile: dataset.fileName, rowsBefore: before, rowsAfter: rows.length, unchangedSource: true } })
 })
 function rowIsPresent(value: number) { return Number.isFinite(value) }
 app.post('/api/train', (request, response) => {
