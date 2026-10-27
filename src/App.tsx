@@ -4,7 +4,7 @@ import './App.css'
 type Column = { name: string; type: 'numeric' | 'categorical'; missing: number; unique: number; topValues?: { value: string; count: number }[] }
 type Analysis = { fileName: string; rows: number; columns: number; schema: Column[]; series: { label: number; value: number }[] }
 type ViewName = 'Overview' | 'Explore data' | 'Ask Lumen' | 'Model lab'
-const demo: Analysis = { fileName: 'northstar_sales_q3.csv', rows: 3, columns: 3, schema: [{ name: 'Revenue', type: 'numeric', missing: 0, unique: 1640 }, { name: 'Orders', type: 'numeric', missing: 12, unique: 620 }, { name: 'Segment', type: 'categorical', missing: 3, unique: 3, topValues: [{ value: 'Enterprise', count: 120 }, { value: 'Mid-market', count: 82 }, { value: 'SMB', count: 45 }] }], series: [42000, 55000, 48000].map((value, label) => ({ value, label })) }
+const demo: Analysis = { fileName: 'northstar_sales_q3.csv', rows: 3, columns: 3, schema: [{ name: 'Revenue', type: 'numeric', missing: 0, unique: 3 }, { name: 'Orders', type: 'numeric', missing: 0, unique: 3 }, { name: 'Segment', type: 'categorical', missing: 0, unique: 3, topValues: [{ value: 'Enterprise', count: 1 }, { value: 'Mid-market', count: 1 }, { value: 'SMB', count: 1 }] }], series: [42000, 55000, 48000].map((value, label) => ({ value, label })) }
 const navItems: { name: ViewName; id: string; icon: string }[] = [{ name: 'Overview', id: 'overview', icon: '◈' }, { name: 'Explore data', id: 'explore', icon: '⌁' }, { name: 'Ask Lumen', id: 'ask', icon: '✦' }, { name: 'Model lab', id: 'model-lab', icon: '◫' }]
 
 function Chart({ mode, data }: { mode: string; data: Analysis }) {
