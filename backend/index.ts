@@ -159,7 +159,7 @@ app.post('/api/clean', (request, response) => {
   } else steps.push({ name: 'Remove duplicate rows', detail: 'Skipped by user.', status: 'skipped' })
   const columns = Object.keys(rows[0] ?? {}).length ? Object.keys(rows[0]) : dataset.columns
   const escapeCsv = (value: unknown) => { const text = value === null || value === undefined ? '' : String(value); return /[",\\r\\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text }
-  const csv = [columns.map(escapeCsv).join(','), ...rows.map((row) => columns.map((column) => escapeCsv(row[column])).join(','))].join('\\n')
+  const csv = [columns.map(escapeCsv).join(','), ...rows.map((row) => columns.map((column) => escapeCsv(row[column])).join(','))].join('\n')
   return response.json({ steps, rowsBefore: before, rowsAfter: rows.length, missingCellsBefore: missingCount, downloadName: `cleaned-${dataset.fileName.replace(/\\.[^.]+$/, '')}.csv`, csv, audit: { options, sourceFile: dataset.fileName, rowsBefore: before, rowsAfter: rows.length, unchangedSource: true } })
 })
 function rowIsPresent(value: number) { return Number.isFinite(value) }
