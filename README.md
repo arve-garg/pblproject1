@@ -17,10 +17,10 @@ Requires a recent Node.js release compatible with Vite 8.
 
 ```bash
 npm install
-npm run dev:full
+npm run dev
 ```
 
-The Vite frontend runs on its usual development port and proxies `/api` requests to the Express API at `http://localhost:8787`. You can also run `npm run dev` and `npm run api` in separate terminals.
+The standard `npm run dev` command starts both the Vite frontend and the Express API at `http://localhost:8787`. The Vite dev server proxies `/api` requests to the API automatically. If the API fails to start, check whether port 8787 is already in use.
 
 ## Upload limits and PDF support
 
