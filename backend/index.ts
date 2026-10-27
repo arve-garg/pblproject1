@@ -137,7 +137,7 @@ app.post('/api/clean', (request, response) => {
   } else steps.push({ name: 'Drop rows with missing values', detail: 'Skipped by user.', status: 'skipped' })
   if (options.fillNumericMissing) {
     let filled = 0
-    for (const column of dataset.columns) {
+    for (const column of (Object.keys(rows[0] ?? {}).length ? Object.keys(rows[0]) : dataset.columns)) {
       const values = rows.map((row) => numeric(row[column])).filter((value) => Number.isFinite(value) && rowIsPresent(value))
       const nonEmpty = rows.map((row) => row[column]).filter((value) => value !== null && value !== undefined && String(value).trim() !== '')
       const numericColumn = values.length > 0 && values.length / Math.max(nonEmpty.length, 1) >= 0.7
