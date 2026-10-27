@@ -30,3 +30,17 @@
 button:disabled { cursor:wait; opacity:.62; }
 @media (max-width:900px) { .cleaning-card { grid-column:auto; } }
 @media (max-width:620px) { .clean-options { grid-template-columns:1fr; }.dataset-select { max-width:100%; } }
+
+/* Dataset upload feedback and Lumen's transparent agent trace */
+.workspace-name { display:block; overflow:hidden; max-width:180px; text-overflow:ellipsis; white-space:nowrap; }
+.upload-error { margin:12px 0 18px; padding:14px 16px; border:1px solid rgba(220,125,120,.55); border-radius:10px; background:rgba(220,125,120,.08); color:var(--ink); }
+.upload-error strong { display:block; color:#f0a09a; font-size:12px; }
+.upload-error p { margin:6px 0 8px; color:var(--muted); font-size:12px; line-height:1.55; white-space:pre-line; overflow-wrap:anywhere; }
+.agent-trace { margin-top:14px; padding-top:12px; border-top:1px solid var(--line); }
+.agent-trace>strong { display:block; margin-bottom:10px; font-size:11px; color:var(--ink); }
+.agent-step { display:grid; grid-template-columns:28px minmax(0,1fr); gap:9px; padding:9px 0; border-bottom:1px solid var(--line); }
+.agent-step>span { color:var(--amber); font-size:10px; font-weight:700; }
+.agent-step b,.agent-step small { display:block; }
+.agent-step b { font-size:11px; }
+.agent-step small { margin-top:2px; color:var(--muted); font-size:10px; }
+.agent-step p { margin:4px 0 0; color:var(--muted); font-size:10px; line-height:1.5; overflow-wrap:anywhere; }
