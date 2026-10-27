@@ -90,7 +90,7 @@ app.post('/api/analyze-batch', upload.array('files', 10), async (request, respon
   return response.json({ results, accepted: results.filter((item) => 'analysis' in item).length, failed: results.filter((item) => 'error' in item).length })
 })
 
-function getDataset(datasetId?: string) { return datasets.get(datasetId || demoDatasetId) ?? [...datasets.values()].at(-1) }
+function getDataset(datasetId?: string) { return datasets.get(datasetId || demoDatasetId) }
 
 app.post('/api/ask', (request, response) => {
   const { datasetId, question } = request.body as { datasetId?: string; question?: string }
@@ -166,11 +166,23 @@ function rowIsPresent(value: number) { return Number.isFinite(value) }
 app.post('/api/train', (request, response) => {
   const { datasetId, target, algorithm, testSize } = request.body as { datasetId?: string; target?: string; algorithm?: string; testSize?: number }
   const dataset = getDataset(datasetId)
-  if (!dataset) return response.status(400).json({ error: 'Upload a dataset before training.' })
-  const targetColumn = target || dataset.columns.find((column) => profile(dataset).schema.find((item) => item.name === column)?.type === 'numeric') || dataset.columns[0]
-  return response.json({ model: algorithm || 'Explainable baseline', target: targetColumn, testSize: testSize ?? 20, metrics: { r2: 0.78, mae: 12.4, samples: dataset.rows.length }, steps: ['Selected numeric target', 'Split rows into train and test sets', 'Learned baseline from available numeric signals', 'Evaluated on held-out rows'], note: 'This local baseline is intentionally inspectable. Add a provider in server/index.ts to train a production model.' })
+  if (!dataset) return response.status(404).json({ error: 'Dataset not found. Select or upload a dataset before evaluating.' })
+  const targetColumn = target || dataset.columns.find((column) => profile(dataset).schema.find((item) => item.name === column)?.type === 'numeric')
+  if (!targetColumn || !dataset.columns.includes(targetColumn)) return response.status(400).json({ error: `Target field "${targetColumn ?? ''}" was not found in this dataset.` })
+  const values = dataset.rows.map((row) => numeric(row[targetColumn])).filter(Number.isFinite)
+  if (values.length < 3) return response.status(400).json({ error: 'At least 3 numeric target values are required to evaluate a holdout baseline.' })
+  const fraction = Math.min(0.5, Math.max(0.1, (testSize ?? 20) / 100))
+  const testCount = Math.max(1, Math.min(values.length - 1, Math.ceil(values.length * fraction)))
+  const trainValues = values.slice(0, values.length - testCount)
+  const testValues = values.slice(values.length - testCount)
+  const prediction = trainValues.reduce((sum, value) => sum + value, 0) / trainValues.length
+  const mae = testValues.reduce((sum, value) => sum + Math.abs(value - prediction), 0) / testValues.length
+  const actualMean = testValues.reduce((sum, value) => sum + value, 0) / testValues.length
+  const totalSquares = testValues.reduce((sum, value) => sum + (value - actualMean) ** 2, 0)
+  const residualSquares = testValues.reduce((sum, value) => sum + (value - prediction) ** 2, 0)
+  const r2 = totalSquares === 0 ? null : 1 - residualSquares / totalSquares
+  return response.json({ model: 'Mean baseline (not ML training)', target: targetColumn, testSize: testSize ?? 20, metrics: { r2: r2 === null ? null : Number(r2.toFixed(4)), mae: Number(mae.toFixed(4)), samples: values.length, trainSamples: trainValues.length, testSamples: testValues.length }, steps: [`Selected numeric target "${targetColumn}"`, `Used the first ${trainValues.length} values for baseline estimation`, `Evaluated the training mean on the final ${testValues.length} values`, 'Calculated MAE and R² from the holdout values'], note: 'This is a deterministic mean baseline, not a learned machine-learning model. The metric values are calculated from the selected dataset.' })
 })
-
 app.post('/api/predict', (request, response) => {
   const { datasetId, target, inputs } = request.body as { datasetId?: string; target?: string; inputs?: Record<string, unknown> }
   const dataset = getDataset(datasetId)
