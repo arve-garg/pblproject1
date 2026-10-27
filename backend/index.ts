@@ -95,12 +95,37 @@ function getDataset(datasetId?: string) { return datasets.get(datasetId || demoD
 app.post('/api/ask', (request, response) => {
   const { datasetId, question } = request.body as { datasetId?: string; question?: string }
   const dataset = getDataset(datasetId)
-  if (!dataset || !question?.trim()) return response.status(400).json({ error: 'Provide a datasetId and question.' })
+  if (!dataset || !question?.trim()) return response.status(400).json({ error: 'Select a dataset and enter a question.' })
   const summary = profile(dataset)
-  const numericSummary = summary.schema.filter((column) => column.type === 'numeric').map((column) => `${column.name}: average ${column.average?.toFixed(2)}, range ${column.min} to ${column.max}`).join('; ')
-  return response.json({ answer: `I inspected ${summary.rows.toLocaleString()} rows across ${summary.columns} columns. For “${question.trim()}”, the strongest available numeric signal is ${numericSummary || 'not enough numeric columns to calculate a measure'}. Connect an LLM provider to replace this deterministic analysis with a full reasoning trace.`, evidence: { rows: summary.rows, columns: summary.columns, schema: summary.schema } })
+  const q = question.trim().toLowerCase()
+  const steps: { agent: string; action: string; result: string }[] = []
+  steps.push({ agent: 'Planner', action: 'Classify request', result: q.includes('missing') || q.includes('clean') || q.includes('quality') ? 'Data-quality inspection' : q.includes('column') || q.includes('field') || q.includes('schema') ? 'Schema inspection' : q.includes('preview') || q.includes('sample') || q.includes('row') ? 'Row preview' : q.includes('highest') || q.includes('lowest') || q.includes('average') || q.includes('mean') || q.includes('numeric') || q.includes('trend') || q.includes('signal') ? 'Numeric analysis' : 'Dataset overview' })
+  steps.push({ agent: 'Data Profiler', action: 'Inspect active dataset', result: dataset.fileName + ': ' + summary.rows + ' rows, ' + summary.columns + ' columns' })
+  let answer = ''
+  if (q.includes('missing') || q.includes('clean') || q.includes('quality')) {
+    const columns = summary.schema.filter((column) => column.missing > 0).sort((a, b) => b.missing - a.missing)
+    const total = summary.schema.reduce((sum, column) => sum + column.missing, 0)
+    answer = total ? 'I found ' + total + ' missing cells. ' + columns.map((column) => column.name + ': ' + column.missing + ' missing').join('; ') + '. Consider reviewing these fields before selecting a cleaning action.' : 'No missing cells were detected in the active dataset. You can still check for duplicate rows, whitespace, and inconsistent categories in the cleaning pipeline.'
+    steps.push({ agent: 'Quality Agent', action: 'Count missing cells', result: total + ' missing cells across ' + columns.length + ' affected fields' })
+  } else if (q.includes('column') || q.includes('field') || q.includes('schema')) {
+    answer = 'The active dataset has ' + summary.columns + ' fields: ' + summary.schema.map((column) => column.name + ' (' + column.type + ', ' + column.unique + ' unique, ' + column.missing + ' missing)').join('; ') + '.'
+    steps.push({ agent: 'Schema Agent', action: 'Summarize columns', result: summary.schema.length + ' field profiles reviewed' })
+  } else if (q.includes('preview') || q.includes('sample') || q.includes('row')) {
+    answer = 'Here is the available sample from ' + dataset.fileName + ': ' + JSON.stringify(dataset.rows.slice(0, 5))
+    steps.push({ agent: 'Sample Agent', action: 'Read first rows', result: 'Returned ' + Math.min(5, dataset.rows.length) + ' sample rows' })
+  } else if (q.includes('highest') || q.includes('lowest') || q.includes('average') || q.includes('mean') || q.includes('numeric') || q.includes('trend') || q.includes('signal')) {
+    const numericColumns = summary.schema.filter((column) => column.type === 'numeric')
+    const stats = numericColumns.map((column) => ({ name: column.name, min: column.min, max: column.max, average: column.average }))
+    const target = q.includes('highest') ? stats.reduce((best, current) => !best || (current.max ?? -Infinity) > (best.max ?? -Infinity) ? current : best, undefined as typeof stats[number] | undefined) : q.includes('lowest') ? stats.reduce((best, current) => !best || (current.min ?? Infinity) < (best.min ?? Infinity) ? current : best, undefined as typeof stats[number] | undefined) : undefined
+    answer = stats.length ? 'Numeric summary for ' + dataset.fileName + ': ' + stats.map((item) => item.name + ' — mean ' + Number(item.average).toFixed(2) + ', min ' + item.min + ', max ' + item.max).join('; ') + (target ? '. ' + (q.includes('highest') ? 'Largest maximum: ' : 'Smallest minimum: ') + target.name + '.' : '') : 'I could not identify numeric columns in this dataset. Check the detected schema or upload a structured CSV/Excel file.'
+    steps.push({ agent: 'Statistics Agent', action: 'Calculate numeric summaries', result: stats.length + ' numeric fields summarized from the uploaded rows' })
+  } else {
+    answer = 'Dataset overview for ' + dataset.fileName + ': ' + summary.rows + ' rows and ' + summary.columns + ' columns. Fields: ' + summary.schema.map((column) => column.name + ' (' + column.type + ')').join(', ') + '. Try asking about missing values, column types, numeric averages/ranges, or a sample of rows.'
+    steps.push({ agent: 'Insight Agent', action: 'Build overview', result: 'Summarized schema and dataset size' })
+  }
+  steps.push({ agent: 'Evidence Check', action: 'Ground response in data', result: 'Answer derived from the currently selected in-memory dataset; no external facts used' })
+  return response.json({ answer, steps, evidence: { fileName: dataset.fileName, rows: summary.rows, columns: summary.columns, schema: summary.schema } })
 })
-
 app.post('/api/clean', (request, response) => {
   const { datasetId, options = {} } = request.body as { datasetId?: string; options?: { trimStrings?: boolean; removeEmptyRows?: boolean; dropMissingRows?: boolean; deduplicateRows?: boolean; fillNumericMissing?: boolean; normalizeHeaders?: boolean } }
   const dataset = datasets.get(datasetId || demoDatasetId)
@@ -120,7 +145,7 @@ app.post('/api/clean', (request, response) => {
     record('Trim text values', `Trimmed leading/trailing whitespace in text cells.`, affected)
   } else steps.push({ name: 'Trim text values', detail: 'Skipped by user.', status: 'skipped' })
   if (options.normalizeHeaders) {
-    const renamed = new Map(dataset.columns.map((column) => [column, column.trim().replace(/\\s+/g, '_')]))
+    const renamed = new Map(dataset.columns.map((column) => [column, column.trim().replace(/\s+/g, '_')]))
     rows = rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [renamed.get(key) ?? key, value])))
     record('Normalize column names', 'Trimmed headers and replaced internal spaces with underscores.', dataset.columns.filter((column) => renamed.get(column) !== column).length)
   } else steps.push({ name: 'Normalize column names', detail: 'Skipped by user.', status: 'skipped' })
@@ -158,9 +183,9 @@ app.post('/api/clean', (request, response) => {
     record('Remove duplicate rows', `Removed ${count - rows.length} exact duplicate rows.`, count - rows.length)
   } else steps.push({ name: 'Remove duplicate rows', detail: 'Skipped by user.', status: 'skipped' })
   const columns = Object.keys(rows[0] ?? {}).length ? Object.keys(rows[0]) : dataset.columns
-  const escapeCsv = (value: unknown) => { const text = value === null || value === undefined ? '' : String(value); return /[",\\r\\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text }
+  const escapeCsv = (value: unknown) => { const text = value === null || value === undefined ? '' : String(value); return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text }
   const csv = [columns.map(escapeCsv).join(','), ...rows.map((row) => columns.map((column) => escapeCsv(row[column])).join(','))].join('\n')
-  return response.json({ steps, rowsBefore: before, rowsAfter: rows.length, missingCellsBefore: missingCount, downloadName: `cleaned-${dataset.fileName.replace(/\\.[^.]+$/, '')}.csv`, csv, audit: { options, sourceFile: dataset.fileName, rowsBefore: before, rowsAfter: rows.length, unchangedSource: true } })
+  return response.json({ steps, rowsBefore: before, rowsAfter: rows.length, missingCellsBefore: missingCount, downloadName: 'cleaned-' + dataset.fileName.replace(/\.[^.]+$/, '') + '.csv', csv, audit: { options, sourceFile: dataset.fileName, rowsBefore: before, rowsAfter: rows.length, unchangedSource: true } })
 })
 function rowIsPresent(value: number) { return Number.isFinite(value) }
 app.post('/api/train', (request, response) => {
