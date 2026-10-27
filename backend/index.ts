@@ -5,10 +5,11 @@ import { parse } from 'csv-parse/sync'
 import * as XLSX from 'xlsx'
 import os from 'node:os'
 import path from 'node:path'
+import pdf from 'pdf-parse'
 import fs from 'node:fs/promises'
 
 const app = express()
-const upload = multer({ dest: path.join(os.tmpdir(), 'lumen-uploads'), limits: { fileSize: 6 * 1024 * 1024 * 1024 } })
+const upload = multer({ dest: path.join(os.tmpdir(), 'lumen-uploads'), limits: { fileSize: 25 * 1024 * 1024, files: 10, fields: 20 } })
 app.use(cors())
 app.use(express.json({ limit: '2mb' }))
 
@@ -38,13 +39,16 @@ async function readDataset(file: Express.Multer.File): Promise<Dataset> {
     return { fileName: file.originalname, rows: clean, columns: Object.keys(clean[0] ?? {}) }
   }
   if (extension === 'pdf') {
-    const rows = [{ page_text: `PDF uploaded: ${file.originalname}`, file_size_bytes: file.size }]
-    return { fileName: file.originalname, rows, columns: ['page_text', 'file_size_bytes'] }
+    const extracted = await pdf(buffer)
+    const lines = extracted.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+    if (!lines.length) throw new Error(`No selectable text found in ${file.originalname}. Scanned/image-only PDFs need OCR before analysis.`)
+    const rows = lines.map((text, index) => ({ line_number: index + 1, text }))
+    return { fileName: file.originalname, rows, columns: ['line_number', 'text'] }
   }
   throw new Error('Unsupported format. Use CSV, XLSX, XLS, or PDF.')
 }
 
-function numeric(value: unknown) { return typeof value === 'number' ? value : Number(String(value).replace(/[$,%\s,]/g, '')) }
+function numeric(value: unknown) { if (value === null || value === undefined || String(value).trim() === '') return Number.NaN; return typeof value === 'number' ? value : Number(String(value).replace(/[$,%\s,]/g, '')) }
 function profile(dataset: Dataset) {
   const columns = dataset.columns.map((name) => {
     const values = dataset.rows.map((row) => row[name]).filter((value) => value !== null && value !== undefined && value !== '')
@@ -70,7 +74,23 @@ app.post('/api/analyze', upload.single('file'), async (request, response) => {
   finally { if (request.file?.path) await fs.rm(request.file.path, { force: true }).catch(() => undefined) }
 })
 
-function getDataset(datasetId?: string) { return datasets.get(datasetId || demoDatasetId) ?? [...datasets.values()].at(-1) }
+app.post('/api/analyze-batch', upload.array('files', 10), async (request, response) => {
+  const files = (request.files ?? []) as Express.Multer.File[]
+  if (!files.length) return response.status(400).json({ error: 'Choose one or more CSV, Excel, or text-based PDF files.' })
+  const results = await Promise.all(files.map(async (file) => {
+    try {
+      const dataset = await readDataset(file)
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      datasets.set(id, dataset)
+      return { id, analysis: profile(dataset) }
+    } catch (error) {
+      return { fileName: file.originalname, error: error instanceof Error ? error.message : 'Could not analyze file.' }
+    } finally { await fs.rm(file.path, { force: true }).catch(() => undefined) }
+  }))
+  return response.json({ results, accepted: results.filter((item) => 'analysis' in item).length, failed: results.filter((item) => 'error' in item).length })
+})
+
+function getDataset(datasetId?: string) { return datasets.get(datasetId || demoDatasetId) }
 
 app.post('/api/ask', (request, response) => {
   const { datasetId, question } = request.body as { datasetId?: string; question?: string }
@@ -82,28 +102,87 @@ app.post('/api/ask', (request, response) => {
 })
 
 app.post('/api/clean', (request, response) => {
-  const { datasetId } = request.body as { datasetId?: string }
-  const dataset = getDataset(datasetId)
+  const { datasetId, options = {} } = request.body as { datasetId?: string; options?: { trimStrings?: boolean; removeEmptyRows?: boolean; dropMissingRows?: boolean; deduplicateRows?: boolean; fillNumericMissing?: boolean; normalizeHeaders?: boolean } }
+  const dataset = datasets.get(datasetId || demoDatasetId)
   if (!dataset) return response.status(400).json({ error: 'Upload a dataset before cleaning it.' })
-  const steps = [
-    { name: 'Profile missing values', detail: 'Counted empty cells by field.', status: 'complete' },
-    { name: 'Normalize column names', detail: 'Trimmed whitespace from headers.', status: 'complete' },
-    { name: 'Remove empty rows', detail: 'Removed rows with no usable values.', status: 'complete' },
-    { name: 'Preserve source values', detail: 'No values are silently overwritten.', status: 'transparent' },
-  ]
-  const header = dataset.columns.join(',')
-  const csv = [header, ...dataset.rows.map((row) => dataset.columns.map((column) => JSON.stringify(row[column] ?? '')).join(','))].join('\n')
-  return response.json({ steps, rowsBefore: dataset.rows.length, rowsAfter: dataset.rows.length, downloadName: `cleaned-${dataset.fileName.replace(/\.[^.]+$/, '')}.csv`, csv })
+  const before = dataset.rows.length
+  let rows = dataset.rows.map((row) => ({ ...row }))
+  const steps: { name: string; detail: string; status: string; affected?: number }[] = []
+  const record = (name: string, detail: string, affected = 0) => steps.push({ name, detail, affected, status: 'complete' })
+  const missingCount = rows.reduce((sum, row) => sum + dataset.columns.filter((column) => row[column] === null || row[column] === undefined || String(row[column]).trim() === '').length, 0)
+  record('Profile missing values', `Found ${missingCount} empty cells across ${dataset.columns.length} fields; source values are preserved unless an option below is selected.`)
+  if (options.trimStrings) {
+    let affected = 0
+    rows = rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => {
+      if (typeof value === 'string' && value !== value.trim()) affected++
+      return [key, typeof value === 'string' ? value.trim() : value]
+    })))
+    record('Trim text values', `Trimmed leading/trailing whitespace in text cells.`, affected)
+  } else steps.push({ name: 'Trim text values', detail: 'Skipped by user.', status: 'skipped' })
+  if (options.normalizeHeaders) {
+    const renamed = new Map(dataset.columns.map((column) => [column, column.trim().replace(/\\s+/g, '_')]))
+    rows = rows.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [renamed.get(key) ?? key, value])))
+    record('Normalize column names', 'Trimmed headers and replaced internal spaces with underscores.', dataset.columns.filter((column) => renamed.get(column) !== column).length)
+  } else steps.push({ name: 'Normalize column names', detail: 'Skipped by user.', status: 'skipped' })
+  if (options.removeEmptyRows) {
+    const count = rows.length
+    rows = rows.filter((row) => Object.values(row).some((value) => value !== null && value !== undefined && String(value).trim() !== ''))
+    record('Remove empty rows', `Removed ${count - rows.length} fully empty rows.`, count - rows.length)
+  } else steps.push({ name: 'Remove empty rows', detail: 'Skipped by user.', status: 'skipped' })
+  if (options.dropMissingRows) {
+    const count = rows.length
+    const activeColumns = Object.keys(rows[0] ?? {}).length ? Object.keys(rows[0]) : dataset.columns
+    rows = rows.filter((row) => activeColumns.every((column) => row[column] !== null && row[column] !== undefined && String(row[column]).trim() !== ''))
+    record('Drop rows with missing values', `Removed ${count - rows.length} rows containing at least one missing value.`, count - rows.length)
+  } else steps.push({ name: 'Drop rows with missing values', detail: 'Skipped by user.', status: 'skipped' })
+  if (options.fillNumericMissing) {
+    let filled = 0
+    for (const column of (Object.keys(rows[0] ?? {}).length ? Object.keys(rows[0]) : dataset.columns)) {
+      const values = rows.map((row) => numeric(row[column])).filter((value) => Number.isFinite(value) && rowIsPresent(value))
+      const nonEmpty = rows.map((row) => row[column]).filter((value) => value !== null && value !== undefined && String(value).trim() !== '')
+      const numericColumn = values.length > 0 && values.length / Math.max(nonEmpty.length, 1) >= 0.7
+      if (!numericColumn) continue
+      const mean = values.reduce((sum, value) => sum + value, 0) / values.length
+      rows = rows.map((row) => {
+        const value = row[column]
+        if (value === null || value === undefined || String(value).trim() === '') { filled++; return { ...row, [column]: Number(mean.toFixed(6)) } }
+        return row
+      })
+    }
+    record('Fill numeric missing values', `Filled blank cells in numeric columns with each column's mean.`, filled)
+  } else steps.push({ name: 'Fill numeric missing values', detail: 'Skipped by user.', status: 'skipped' })
+  if (options.deduplicateRows) {
+    const count = rows.length
+    const seen = new Set<string>()
+    rows = rows.filter((row) => { const key = JSON.stringify(row); if (seen.has(key)) return false; seen.add(key); return true })
+    record('Remove duplicate rows', `Removed ${count - rows.length} exact duplicate rows.`, count - rows.length)
+  } else steps.push({ name: 'Remove duplicate rows', detail: 'Skipped by user.', status: 'skipped' })
+  const columns = Object.keys(rows[0] ?? {}).length ? Object.keys(rows[0]) : dataset.columns
+  const escapeCsv = (value: unknown) => { const text = value === null || value === undefined ? '' : String(value); return /[",\\r\\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text }
+  const csv = [columns.map(escapeCsv).join(','), ...rows.map((row) => columns.map((column) => escapeCsv(row[column])).join(','))].join('\n')
+  return response.json({ steps, rowsBefore: before, rowsAfter: rows.length, missingCellsBefore: missingCount, downloadName: `cleaned-${dataset.fileName.replace(/\\.[^.]+$/, '')}.csv`, csv, audit: { options, sourceFile: dataset.fileName, rowsBefore: before, rowsAfter: rows.length, unchangedSource: true } })
 })
-
+function rowIsPresent(value: number) { return Number.isFinite(value) }
 app.post('/api/train', (request, response) => {
   const { datasetId, target, algorithm, testSize } = request.body as { datasetId?: string; target?: string; algorithm?: string; testSize?: number }
   const dataset = getDataset(datasetId)
-  if (!dataset) return response.status(400).json({ error: 'Upload a dataset before training.' })
-  const targetColumn = target || dataset.columns.find((column) => profile(dataset).schema.find((item) => item.name === column)?.type === 'numeric') || dataset.columns[0]
-  return response.json({ model: algorithm || 'Explainable baseline', target: targetColumn, testSize: testSize ?? 20, metrics: { r2: 0.78, mae: 12.4, samples: dataset.rows.length }, steps: ['Selected numeric target', 'Split rows into train and test sets', 'Learned baseline from available numeric signals', 'Evaluated on held-out rows'], note: 'This local baseline is intentionally inspectable. Add a provider in server/index.ts to train a production model.' })
+  if (!dataset) return response.status(404).json({ error: 'Dataset not found. Select or upload a dataset before evaluating.' })
+  const targetColumn = target || dataset.columns.find((column) => profile(dataset).schema.find((item) => item.name === column)?.type === 'numeric')
+  if (!targetColumn || !dataset.columns.includes(targetColumn)) return response.status(400).json({ error: `Target field "${targetColumn ?? ''}" was not found in this dataset.` })
+  const values = dataset.rows.map((row) => numeric(row[targetColumn])).filter(Number.isFinite)
+  if (values.length < 3) return response.status(400).json({ error: 'At least 3 numeric target values are required to evaluate a holdout baseline.' })
+  const fraction = Math.min(0.5, Math.max(0.1, (testSize ?? 20) / 100))
+  const testCount = Math.max(1, Math.min(values.length - 1, Math.ceil(values.length * fraction)))
+  const trainValues = values.slice(0, values.length - testCount)
+  const testValues = values.slice(values.length - testCount)
+  const prediction = trainValues.reduce((sum, value) => sum + value, 0) / trainValues.length
+  const mae = testValues.reduce((sum, value) => sum + Math.abs(value - prediction), 0) / testValues.length
+  const actualMean = testValues.reduce((sum, value) => sum + value, 0) / testValues.length
+  const totalSquares = testValues.reduce((sum, value) => sum + (value - actualMean) ** 2, 0)
+  const residualSquares = testValues.reduce((sum, value) => sum + (value - prediction) ** 2, 0)
+  const r2 = totalSquares === 0 ? null : 1 - residualSquares / totalSquares
+  return response.json({ model: 'Mean baseline (not ML training)', target: targetColumn, testSize: testSize ?? 20, metrics: { r2: r2 === null ? null : Number(r2.toFixed(4)), mae: Number(mae.toFixed(4)), samples: values.length, trainSamples: trainValues.length, testSamples: testValues.length }, steps: [`Selected numeric target "${targetColumn}"`, `Used the first ${trainValues.length} values for baseline estimation`, `Evaluated the training mean on the final ${testValues.length} values`, 'Calculated MAE and R² from the holdout values'], note: 'This is a deterministic mean baseline, not a learned machine-learning model. The metric values are calculated from the selected dataset.' })
 })
-
 app.post('/api/predict', (request, response) => {
   const { datasetId, target, inputs } = request.body as { datasetId?: string; target?: string; inputs?: Record<string, unknown> }
   const dataset = getDataset(datasetId)
@@ -125,7 +204,8 @@ app.patch('/api/datasets/:id', (request, response) => {
 
 app.get('/api/health', (_request, response) => response.json({ status: 'ok', service: 'lumen-api' }))
 app.use((error: { code?: string; message?: string }, _request: express.Request, response: express.Response, next: express.NextFunction) => {
-  if (error.code === 'LIMIT_FILE_SIZE') return response.status(413).json({ error: 'Dataset exceeds the 6 GB intake limit.' })
+  if (error.code === 'LIMIT_FILE_SIZE') return response.status(413).json({ error: 'A file exceeds the 25 MB upload limit.' })
+  if (error.code === 'LIMIT_FILE_COUNT') return response.status(413).json({ error: 'Upload up to 10 files at a time.' })
   if (error) return response.status(400).json({ error: error.message ?? 'Request failed.' })
   return next()
 })
