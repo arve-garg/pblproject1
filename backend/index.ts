@@ -131,7 +131,8 @@ app.post('/api/clean', (request, response) => {
   } else steps.push({ name: 'Remove empty rows', detail: 'Skipped by user.', status: 'skipped' })
   if (options.dropMissingRows) {
     const count = rows.length
-    rows = rows.filter((row) => dataset.columns.every((column) => row[column] !== null && row[column] !== undefined && String(row[column]).trim() !== ''))
+    const activeColumns = Object.keys(rows[0] ?? {}).length ? Object.keys(rows[0]) : dataset.columns
+    rows = rows.filter((row) => activeColumns.every((column) => row[column] !== null && row[column] !== undefined && String(row[column]).trim() !== ''))
     record('Drop rows with missing values', `Removed ${count - rows.length} rows containing at least one missing value.`, count - rows.length)
   } else steps.push({ name: 'Drop rows with missing values', detail: 'Skipped by user.', status: 'skipped' })
   if (options.fillNumericMissing) {
