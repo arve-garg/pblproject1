@@ -40,7 +40,7 @@ async function readDataset(file: Express.Multer.File): Promise<Dataset> {
   }
   if (extension === 'pdf') {
     const extracted = await pdf(buffer)
-    const lines = extracted.text.split(/\\r?\\n/).map((line) => line.trim()).filter(Boolean)
+    const lines = extracted.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
     if (!lines.length) throw new Error(`No selectable text found in ${file.originalname}. Scanned/image-only PDFs need OCR before analysis.`)
     const rows = lines.map((text, index) => ({ line_number: index + 1, text }))
     return { fileName: file.originalname, rows, columns: ['line_number', 'text'] }
@@ -48,7 +48,7 @@ async function readDataset(file: Express.Multer.File): Promise<Dataset> {
   throw new Error('Unsupported format. Use CSV, XLSX, XLS, or PDF.')
 }
 
-function numeric(value: unknown) { return typeof value === 'number' ? value : Number(String(value).replace(/[$,%\s,]/g, '')) }
+function numeric(value: unknown) { if (value === null || value === undefined || String(value).trim() === '') return Number.NaN; return typeof value === 'number' ? value : Number(String(value).replace(/[$,%\s,]/g, '')) }
 function profile(dataset: Dataset) {
   const columns = dataset.columns.map((name) => {
     const values = dataset.rows.map((row) => row[name]).filter((value) => value !== null && value !== undefined && value !== '')
