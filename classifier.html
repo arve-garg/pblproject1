@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#11161d" />
+    <title>Lumen · Classifier Lab</title>
+  </head>
+  <body>
+    <main class="classifier-shell">
+      <a class="back-link" href="/">← Back to Lumen</a>
+      <header>
+        <p class="eyebrow">LUMEN · MODEL LAB</p>
+        <h1>Classifier evaluation</h1>
+        <p class="lede">Train a Gaussian Naive Bayes classifier on a labelled dataset and inspect its holdout scores.</p>
+      </header>
+      <section class="card">
+        <h2>1. Upload labelled data</h2>
+        <p>Use CSV or Excel with a target column containing class labels, such as Species, Outcome, or Category. Keep enough examples in every class.</p>
+        <label class="field-label" for="dataset-file">Dataset file</label>
+        <input id="dataset-file" type="file" accept=".csv,.xlsx,.xls" />
+        <button id="upload-button" class="primary">Upload dataset</button>
+        <p id="upload-status" class="status" role="status">No dataset uploaded yet.</p>
+        <div id="column-list" class="columns"></div>
+      </section>
+      <section class="card">
+        <h2>2. Train and evaluate</h2>
+        <label class="field-label" for="target-column">Target column (class label)</label>
+        <input id="target-column" type="text" placeholder="e.g. Species" />
+        <button id="evaluate-button" class="primary" disabled>Train classifier & calculate scores</button>
+        <p class="note">Uses numeric feature columns, a deterministic stratified 80/20 holdout split, and Gaussian Naive Bayes. The test set is not used for training.</p>
+      </section>
+      <section id="results" class="card results" hidden aria-live="polite"></section>
+      <footer>Evaluation metrics are dataset-specific; do not treat them as the accuracy of Lumen's rule-based agents.</footer>
+    </main>
+    <script type="module" src="/src/classifier.ts"></script>
+  </body>
+</html>
