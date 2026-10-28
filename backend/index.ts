@@ -219,7 +219,7 @@ app.post('/api/classify', (request, response) => {
   const samples = dataset.rows.map((row) => ({ row, label: String(row[targetColumn] ?? '').trim() })).filter((item) => item.label !== '' && item.label.toLowerCase() !== 'null' && item.label.toLowerCase() !== 'undefined')
   const classes = [...new Set(samples.map((item) => item.label))].sort()
   if (classes.length < 2) return response.status(400).json({ error: 'The target must contain at least two different classes.' })
-  const groups = new Map(classes.map((label) => [label, samples.filter((item) => item.label === label)]))
+  const groups = new Map<string, typeof samples>(classes.map((label) => [label, samples.filter((item) => item.label === label)] as [string, typeof samples]))
   if (classes.some((label) => (groups.get(label)?.length ?? 0) < 2)) return response.status(400).json({ error: 'Each class needs at least two labelled rows. Add more examples for every target class.' })
   let seed = 42
   const random = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296 }
