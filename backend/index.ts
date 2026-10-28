@@ -208,6 +208,85 @@ app.post('/api/train', (request, response) => {
   const r2 = totalSquares === 0 ? null : 1 - residualSquares / totalSquares
   return response.json({ model: 'Mean baseline (not ML training)', target: targetColumn, testSize: testSize ?? 20, metrics: { r2: r2 === null ? null : Number(r2.toFixed(4)), mae: Number(mae.toFixed(4)), samples: values.length, trainSamples: trainValues.length, testSamples: testValues.length }, steps: [`Selected numeric target "${targetColumn}"`, `Used the first ${trainValues.length} values for baseline estimation`, `Evaluated the training mean on the final ${testValues.length} values`, 'Calculated MAE and R² from the holdout values'], note: 'This is a deterministic mean baseline, not a learned machine-learning model. The metric values are calculated from the selected dataset.' })
 })
+app.post('/api/classify', (request, response) => {
+  const { datasetId, target } = request.body as { datasetId?: string; target?: string }
+  const dataset = getDataset(datasetId)
+  if (!dataset) return response.status(404).json({ error: 'Dataset not found. Upload a labelled dataset first.' })
+  const targetColumn = String(target ?? '').trim()
+  if (!targetColumn || !dataset.columns.includes(targetColumn)) return response.status(400).json({ error: 'Choose an existing target column containing class labels.' })
+  const numericColumns = profile(dataset).schema.filter((column) => column.type === 'numeric' && column.name !== targetColumn).map((column) => column.name)
+  if (!numericColumns.length) return response.status(400).json({ error: 'This classifier needs at least one numeric feature column besides the target.' })
+  const samples = dataset.rows.map((row) => ({ row, label: String(row[targetColumn] ?? '').trim() })).filter((item) => item.label !== '' && item.label.toLowerCase() !== 'null' && item.label.toLowerCase() !== 'undefined')
+  const classes = [...new Set(samples.map((item) => item.label))].sort()
+  if (classes.length < 2) return response.status(400).json({ error: 'The target must contain at least two different classes.' })
+  const groups = new Map<string, typeof samples>(classes.map((label) => [label, samples.filter((item) => item.label === label)] as [string, typeof samples]))
+  if (classes.some((label) => (groups.get(label)?.length ?? 0) < 2)) return response.status(400).json({ error: 'Each class needs at least two labelled rows. Add more examples for every target class.' })
+  let seed = 42
+  const random = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296 }
+  const train: typeof samples = []
+  const test: typeof samples = []
+  for (const label of classes) {
+    const group = [...(groups.get(label) ?? [])]
+    for (let i = group.length - 1; i > 0; i--) { const j = Math.floor(random() * (i + 1)); [group[i], group[j]] = [group[j], group[i]] }
+    const testCount = Math.max(1, Math.min(group.length - 1, Math.round(group.length * 0.2)))
+    test.push(...group.slice(0, testCount)); train.push(...group.slice(testCount))
+  }
+  const means: Record<string, number> = {}
+  const variances: Record<string, number> = {}
+  for (const column of numericColumns) {
+    const values = train.map((item) => numeric(item.row[column])).filter(Number.isFinite)
+    means[column] = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0
+    variances[column] = values.length ? values.reduce((sum, value) => sum + (value - means[column]) ** 2, 0) / values.length : 0
+  }
+  const classStats = new Map<string, { count: number; means: Record<string, number>; variances: Record<string, number> }>()
+  for (const label of classes) {
+    const rows = train.filter((item) => item.label === label)
+    const classMeans: Record<string, number> = {}; const classVariances: Record<string, number> = {}
+    for (const column of numericColumns) {
+      const values = rows.map((item) => numeric(item.row[column])).filter(Number.isFinite)
+      classMeans[column] = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : means[column]
+      classVariances[column] = values.length ? values.reduce((sum, value) => sum + (value - classMeans[column]) ** 2, 0) / values.length : variances[column]
+    }
+    classStats.set(label, { count: rows.length, means: classMeans, variances: classVariances })
+  }
+  const globalVariance = numericColumns.reduce((sum, column) => sum + variances[column], 0) / numericColumns.length
+  const epsilon = Math.max(globalVariance * 1e-9, 1e-9)
+  const predict = (row: Row) => {
+    let best = classes[0]; let bestScore = -Infinity
+    for (const label of classes) {
+      const stats = classStats.get(label)!
+      let score = Math.log(stats.count / train.length)
+      for (const column of numericColumns) {
+        const raw = numeric(row[column]); const x = Number.isFinite(raw) ? raw : means[column]
+        const variance = Math.max(stats.variances[column], epsilon)
+        const difference = x - stats.means[column]
+        score += -0.5 * Math.log(2 * Math.PI * variance) - (difference * difference) / (2 * variance)
+      }
+      if (score > bestScore) { bestScore = score; best = label }
+    }
+    return best
+  }
+  const matrix = classes.map((actual) => classes.map((predicted) => test.filter((item) => item.label === actual && predict(item.row) === predicted).length))
+  const correct = test.filter((item) => predict(item.row) === item.label).length
+  const perClass = classes.map((label, index) => {
+    const tp = matrix[index][index]
+    const fp = matrix.reduce((sum, row, rowIndex) => sum + (rowIndex === index ? 0 : row[index]), 0)
+    const fn = matrix[index].reduce((sum, count, colIndex) => sum + (colIndex === index ? 0 : count), 0)
+    const precision = tp + fp ? tp / (tp + fp) : 0
+    const recall = tp + fn ? tp / (tp + fn) : 0
+    return { class: label, precision: Number(precision.toFixed(4)), recall: Number(recall.toFixed(4)), f1: Number((precision + recall ? 2 * precision * recall / (precision + recall) : 0).toFixed(4)), support: matrix[index].reduce((sum, count) => sum + count, 0) }
+  })
+  return response.json({
+    model: 'Gaussian Naive Bayes classifier',
+    target: targetColumn,
+    features: numericColumns,
+    split: 'Stratified 80/20 holdout (seed 42)',
+    metrics: { accuracy: Number((correct / test.length).toFixed(4)), correct, testSamples: test.length, trainSamples: train.length, macroPrecision: Number((perClass.reduce((sum, item) => sum + item.precision, 0) / classes.length).toFixed(4)), macroRecall: Number((perClass.reduce((sum, item) => sum + item.recall, 0) / classes.length).toFixed(4)), macroF1: Number((perClass.reduce((sum, item) => sum + item.f1, 0) / classes.length).toFixed(4)) },
+    classes, confusionMatrix: matrix, perClass,
+    note: 'Scores are calculated from this dataset using a deterministic stratified holdout. Use a sufficiently large labelled dataset; results may vary with the dataset and split.'
+  })
+})
+
 app.post('/api/predict', (request, response) => {
   const { datasetId, target, inputs } = request.body as { datasetId?: string; target?: string; inputs?: Record<string, unknown> }
   const dataset = getDataset(datasetId)

@@ -36,6 +36,12 @@ The standard `npm run dev` command starts both the Vite frontend and the Express
 - “Ask Lumen” currently uses deterministic numeric summaries; an LLM provider has not been connected.
 - CSV parsing and PDF extraction are not substitutes for OCR, semantic validation, or domain-specific data quality review.
 
+## Classifier evaluation
+
+Open `http://localhost:5173/classifier.html` while the development server is running to use the supervised classifier lab. Upload a labelled CSV/Excel file, enter the target column (for example, `Species`), and run evaluation. The endpoint implements Gaussian Naive Bayes over numeric feature columns and returns a stratified 80/20 holdout accuracy, macro precision/recall/F1, per-class scores, and a confusion matrix. Each class needs at least two labelled rows; at least one numeric feature column is required.
+
+The classifier scores apply only to the dataset and split shown in the report. They are not the accuracy of Lumen's rule-based question-answering agents. The built-in Northstar demo has too few rows and no repeated target classes for meaningful classification, so upload a labelled dataset for evaluation.
+
 ## Checks
 
 ```bash
