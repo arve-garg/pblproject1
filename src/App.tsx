@@ -79,13 +79,13 @@ function ModelLab({ datasetId, columns }: { datasetId: string; columns: Column[]
 
     <article className="panel tool-card classifier-card">
       <span className="panel-kicker">SUPERVISED MODEL TEST</span><h2>Train classifier & view scores</h2>
-      <p>Choose the label column in your uploaded dataset. The classifier trains on one split, then tests on unseen rows and displays the scores and confusion matrix.</p>
+      <p>Choose the label column in your uploaded dataset. The Random Forest trains on one split, then tests on unseen rows and displays the scores and confusion matrix.</p>
       <label className="classifier-label" htmlFor="classifier-target">Target / class-label column</label>
       <select id="classifier-target" className="tool-input" value={classTarget} onChange={(event) => { setClassTarget(event.target.value); setClassification(null) }}>
         <option value="">Select a target column…</option>
         {columns.map((column) => <option key={column.name} value={column.name}>{column.name} ({column.type})</option>)}
       </select>
-      <div className="classifier-meta"><span>Algorithm</span><strong>Gaussian Naive Bayes</strong><span>Test method</span><strong>Stratified 80/20 holdout</strong></div>
+      <div className="classifier-meta"><span>Algorithm</span><strong>Random Forest · 120 trees</strong><span>Test method</span><strong>Stratified 80/20 holdout</strong></div>
       <button className="primary-button" onClick={classify} disabled={busy !== '' || !classTarget}>{busy === 'classify' ? 'Training and running tests…' : '▶ Run tests & calculate scores'}</button>
       {report && <div className="result-box" role="alert"><strong>Could not evaluate classifier</strong><p>{report}</p></div>}
       {classification && <div className="classification-results" aria-live="polite">

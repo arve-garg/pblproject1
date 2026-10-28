@@ -214,60 +214,108 @@ app.post('/api/classify', (request, response) => {
   if (!dataset) return response.status(404).json({ error: 'Dataset not found. Upload a labelled dataset first.' })
   const targetColumn = String(target ?? '').trim()
   if (!targetColumn || !dataset.columns.includes(targetColumn)) return response.status(400).json({ error: 'Choose an existing target column containing class labels.' })
+
   const numericColumns = profile(dataset).schema.filter((column) => column.type === 'numeric' && column.name !== targetColumn).map((column) => column.name)
-  if (!numericColumns.length) return response.status(400).json({ error: 'This classifier needs at least one numeric feature column besides the target.' })
-  const samples = dataset.rows.map((row) => ({ row, label: String(row[targetColumn] ?? '').trim() })).filter((item) => item.label !== '' && item.label.toLowerCase() !== 'null' && item.label.toLowerCase() !== 'undefined')
+  if (!numericColumns.length) return response.status(400).json({ error: 'This classifier needs at least one numeric feature column besides the target. Encode categorical predictors or select a dataset with numeric features.' })
+
+  const samples = dataset.rows.map((row) => ({ row, label: String(row[targetColumn] ?? '').trim() }))
+    .filter((item) => item.label !== '' && item.label.toLowerCase() !== 'null' && item.label.toLowerCase() !== 'undefined' && item.label.toLowerCase() !== 'nan')
   const classes = [...new Set(samples.map((item) => item.label))].sort()
   if (classes.length < 2) return response.status(400).json({ error: 'The target must contain at least two different classes.' })
   const groups = new Map<string, typeof samples>(classes.map((label) => [label, samples.filter((item) => item.label === label)] as [string, typeof samples]))
-  if (classes.some((label) => (groups.get(label)?.length ?? 0) < 2)) return response.status(400).json({ error: 'Each class needs at least two labelled rows. Add more examples for every target class.' })
+  if (classes.some((label) => (groups.get(label)?.length ?? 0) < 5)) return response.status(400).json({ error: 'For a meaningful evaluation, each target class needs at least 5 labelled rows. Add more labelled examples and try again.' })
+  if (samples.length < 30) return response.status(400).json({ error: 'Use at least 30 labelled rows for a more useful holdout evaluation.' })
+
+  // Deterministic, stratified holdout. All preprocessing and model fitting use training rows only.
   let seed = 42
-  const random = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296 }
+  const random = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296 }
   const train: typeof samples = []
   const test: typeof samples = []
   for (const label of classes) {
     const group = [...(groups.get(label) ?? [])]
     for (let i = group.length - 1; i > 0; i--) { const j = Math.floor(random() * (i + 1)); [group[i], group[j]] = [group[j], group[i]] }
     const testCount = Math.max(1, Math.min(group.length - 1, Math.round(group.length * 0.2)))
-    test.push(...group.slice(0, testCount)); train.push(...group.slice(testCount))
+    test.push(...group.slice(0, testCount))
+    train.push(...group.slice(testCount))
   }
-  const means: Record<string, number> = {}
-  const variances: Record<string, number> = {}
+  // Impute missing numeric values with training-set medians; never inspect test labels when fitting.
+  const medians: Record<string, number> = {}
   for (const column of numericColumns) {
-    const values = train.map((item) => numeric(item.row[column])).filter(Number.isFinite)
-    means[column] = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0
-    variances[column] = values.length ? values.reduce((sum, value) => sum + (value - means[column]) ** 2, 0) / values.length : 0
+    const values = train.map((item) => numeric(item.row[column])).filter(Number.isFinite).sort((a, b) => a - b)
+    medians[column] = values.length ? values[Math.floor(values.length / 2)] : 0
   }
-  const classStats = new Map<string, { count: number; means: Record<string, number>; variances: Record<string, number> }>()
-  for (const label of classes) {
-    const rows = train.filter((item) => item.label === label)
-    const classMeans: Record<string, number> = {}; const classVariances: Record<string, number> = {}
-    for (const column of numericColumns) {
-      const values = rows.map((item) => numeric(item.row[column])).filter(Number.isFinite)
-      classMeans[column] = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : means[column]
-      classVariances[column] = values.length ? values.reduce((sum, value) => sum + (value - classMeans[column]) ** 2, 0) / values.length : variances[column]
+  const vector = (row: Row) => numericColumns.map((column) => {
+    const value = numeric(row[column])
+    return Number.isFinite(value) ? value : medians[column]
+  })
+  const trainVectors = train.map((item) => ({ x: vector(item.row), y: item.label }))
+  const testVectors = test.map((item) => ({ x: vector(item.row), y: item.label }))
+  type Tree = { leaf: string } | { feature: number; threshold: number; left: Tree; right: Tree }
+  const gini = (labels: string[]) => {
+    if (!labels.length) return 0
+    const counts = new Map<string, number>()
+    for (const label of labels) counts.set(label, (counts.get(label) ?? 0) + 1)
+    return 1 - [...counts.values()].reduce((sum, count) => sum + (count / labels.length) ** 2, 0)
+  }
+  const majority = (items: { x: number[]; y: string }[]) => {
+    const counts = new Map<string, number>()
+    for (const item of items) counts.set(item.y, (counts.get(item.y) ?? 0) + 1)
+    return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0]
+  }
+  const maxFeatures = Math.max(1, Math.floor(Math.sqrt(numericColumns.length)))
+  const buildTree = (items: { x: number[]; y: string }[], depth: number): Tree => {
+    const labels = items.map((item) => item.y)
+    if (new Set(labels).size <= 1 || depth >= 14 || items.length < 6) return { leaf: majority(items) }
+    const parentGini = gini(labels)
+    const featureIndexes = numericColumns.map((_, index) => index)
+    for (let i = featureIndexes.length - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1)); [featureIndexes[i], featureIndexes[j]] = [featureIndexes[j], featureIndexes[i]]
     }
-    classStats.set(label, { count: rows.length, means: classMeans, variances: classVariances })
-  }
-  const globalVariance = numericColumns.reduce((sum, column) => sum + variances[column], 0) / numericColumns.length
-  const epsilon = Math.max(globalVariance * 1e-9, 1e-9)
-  const predict = (row: Row) => {
-    let best = classes[0]; let bestScore = -Infinity
-    for (const label of classes) {
-      const stats = classStats.get(label)!
-      let score = Math.log(stats.count / train.length)
-      for (const column of numericColumns) {
-        const raw = numeric(row[column]); const x = Number.isFinite(raw) ? raw : means[column]
-        const variance = Math.max(stats.variances[column], epsilon)
-        const difference = x - stats.means[column]
-        score += -0.5 * Math.log(2 * Math.PI * variance) - (difference * difference) / (2 * variance)
+    let best: { feature: number; threshold: number; gain: number } | undefined
+    for (const feature of featureIndexes.slice(0, maxFeatures)) {
+      const unique = [...new Set(items.map((item) => item.x[feature]))].sort((a, b) => a - b)
+      if (unique.length < 2) continue
+      const candidates: number[] = []
+      const maxCandidates = 24
+      const step = Math.max(1, Math.ceil((unique.length - 1) / maxCandidates))
+      for (let i = step - 1; i < unique.length - 1; i += step) candidates.push((unique[i] + unique[i + 1]) / 2)
+      if (candidates[candidates.length - 1] !== (unique[unique.length - 2] + unique[unique.length - 1]) / 2) candidates.push((unique[unique.length - 2] + unique[unique.length - 1]) / 2)
+      for (const threshold of candidates) {
+        const left = items.filter((item) => item.x[feature] <= threshold)
+        const right = items.filter((item) => item.x[feature] > threshold)
+        if (left.length < 2 || right.length < 2) continue
+        const gain = parentGini - (left.length / items.length) * gini(left.map((item) => item.y)) - (right.length / items.length) * gini(right.map((item) => item.y))
+        if (!best || gain > best.gain) best = { feature, threshold, gain }
       }
-      if (score > bestScore) { bestScore = score; best = label }
     }
-    return best
+    if (!best || best.gain < 1e-8) return { leaf: majority(items) }
+    const left = items.filter((item) => item.x[best!.feature] <= best!.threshold)
+    const right = items.filter((item) => item.x[best!.feature] > best!.threshold)
+    return { feature: best.feature, threshold: best.threshold, left: buildTree(left, depth + 1), right: buildTree(right, depth + 1) }
   }
-  const matrix = classes.map((actual) => classes.map((predicted) => test.filter((item) => item.label === actual && predict(item.row) === predicted).length))
-  const correct = test.filter((item) => predict(item.row) === item.label).length
+  const predictTree = (tree: Tree, x: number[]): string => {
+    let node = tree
+    while (!('leaf' in node)) node = x[node.feature] <= node.threshold ? node.left : node.right
+    return node.leaf
+  }
+  // Random forest: bootstrap samples, random feature subsets at each split, majority vote.
+  const treeCount = 120
+  const forest: Tree[] = []
+  for (let treeIndex = 0; treeIndex < treeCount; treeIndex++) {
+    const bootstrap = Array.from({ length: trainVectors.length }, () => trainVectors[Math.floor(random() * trainVectors.length)])
+    forest.push(buildTree(bootstrap, 0))
+  }
+  const predict = (x: number[]) => {
+    const votes = new Map<string, number>()
+    for (const tree of forest) {
+      const label = predictTree(tree, x)
+      votes.set(label, (votes.get(label) ?? 0) + 1)
+    }
+    return [...votes.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0]
+  }
+  const predictions = testVectors.map((item) => predict(item.x))
+  const matrix = classes.map((actual) => classes.map((predicted) => testVectors.filter((item, index) => item.y === actual && predictions[index] === predicted).length))
+  const correct = testVectors.filter((item, index) => predictions[index] === item.y).length
   const perClass = classes.map((label, index) => {
     const tp = matrix[index][index]
     const fp = matrix.reduce((sum, row, rowIndex) => sum + (rowIndex === index ? 0 : row[index]), 0)
@@ -276,14 +324,15 @@ app.post('/api/classify', (request, response) => {
     const recall = tp + fn ? tp / (tp + fn) : 0
     return { class: label, precision: Number(precision.toFixed(4)), recall: Number(recall.toFixed(4)), f1: Number((precision + recall ? 2 * precision * recall / (precision + recall) : 0).toFixed(4)), support: matrix[index].reduce((sum, count) => sum + count, 0) }
   })
+  const accuracy = correct / testVectors.length
   return response.json({
-    model: 'Gaussian Naive Bayes classifier',
+    model: 'Random Forest classifier (120 trees)',
     target: targetColumn,
     features: numericColumns,
     split: 'Stratified 80/20 holdout (seed 42)',
-    metrics: { accuracy: Number((correct / test.length).toFixed(4)), correct, testSamples: test.length, trainSamples: train.length, macroPrecision: Number((perClass.reduce((sum, item) => sum + item.precision, 0) / classes.length).toFixed(4)), macroRecall: Number((perClass.reduce((sum, item) => sum + item.recall, 0) / classes.length).toFixed(4)), macroF1: Number((perClass.reduce((sum, item) => sum + item.f1, 0) / classes.length).toFixed(4)) },
+    metrics: { accuracy: Number(accuracy.toFixed(4)), correct, testSamples: testVectors.length, trainSamples: trainVectors.length, macroPrecision: Number((perClass.reduce((sum, item) => sum + item.precision, 0) / classes.length).toFixed(4)), macroRecall: Number((perClass.reduce((sum, item) => sum + item.recall, 0) / classes.length).toFixed(4)), macroF1: Number((perClass.reduce((sum, item) => sum + item.f1, 0) / classes.length).toFixed(4)) },
     classes, confusionMatrix: matrix, perClass,
-    note: 'Scores are calculated from this dataset using a deterministic stratified holdout. Use a sufficiently large labelled dataset; results may vary with the dataset and split.'
+    note: 'Random Forest reduces the single-model bias of the previous Gaussian Naive Bayes baseline. Scores are from held-out rows for this dataset and split; high precision is not guaranteed and depends on data quality, predictive features, class labels, and representativeness.'
   })
 })
 
